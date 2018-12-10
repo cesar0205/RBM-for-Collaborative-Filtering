@@ -102,3 +102,7 @@ venv.bak/
 
 # mypy
 .mypy_cache/
+.idea/
+A_test.npz
+A_train.npz
+movielens/ratings_large.csv
