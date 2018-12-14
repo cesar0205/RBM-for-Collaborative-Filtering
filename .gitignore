@@ -106,3 +106,5 @@ venv.bak/
 A_test.npz
 A_train.npz
 movielens/ratings_large.csv
+rbm_cl/
+sparse_datasets/

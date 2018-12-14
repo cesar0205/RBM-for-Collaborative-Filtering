@@ -5,10 +5,11 @@ from sklearn.utils import shuffle
 import matplotlib.pyplot as plt
 from scipy.sparse import load_npz
 from datetime import datetime
+from misc import batch_iterator
 
 '''
 RBM for Collaborative filtering implementation.  
-Takes the A_train and A_test sparse matrices created with the preprocessing.py file and creates an RBM model to
+Takes the A_train and A_test sparse matrices created with the preprocessing_1.py file and creates an RBM model to
 predict future movie ratings.
 For CF methods MSE is applicable as well other metrics as precision, recall and f2 measure.
 In particular we are going to use MSE.
@@ -17,6 +18,7 @@ At the end of each epoch we evaluate the model and check if it is the best curre
 batch level (every some interval of batches). Although the latter approach can find a better global model, 
 it is really computationally expensive and not worth the effort. 
 '''
+
 
 # N Number of samples
 # D Number of movies --- Visible units
@@ -28,17 +30,11 @@ it is really computationally expensive and not worth the effort.
 # b (D, K) Bias matrix for visible units
 
 
-def batch_iterator(X, X_test, batch_sz):
-    N = X.shape[0]
-    for i in range(0, N, batch_sz):
-        start_ind = i;
-        end_ind = min(i + batch_sz, N);
-        yield X[start_ind:end_ind].toarray(), X_test[start_ind:end_ind].toarray();
-
 class RBM(object):
     '''
     RBM for Collaborative filtering implementation.
     '''
+
     def __init__(self, D, M, K):
         self.D = D  # input feature size
         self.M = M  # hidden size
@@ -48,13 +44,13 @@ class RBM(object):
         self.final_model_path = "./rbm_cl/final_model/final_rbm_cl_model";
         self.saved_losses_path = "./rbm_cl/saved_losses_file.epoch";
 
-    def _dot1(V, W):
+    def _dot1(self, V, W):
         # V is N x D x K (batch of visible units)
         # W is D x K x M (weights)
         # returns N x M (hidden layer size)
         return tf.tensordot(V, W, axes=[[1, 2], [0, 1]])
 
-    def _dot2(H, W):
+    def _dot2(self, H, W):
         # H is N x M (batch of hiddens)
         # W is D x K x M (weights transposed)
         # returns N x D x K (visible)
@@ -73,7 +69,7 @@ class RBM(object):
 
         # Train and test data
         self.X_in = tf.placeholder(tf.float32, shape=(None, D), name="X_in")
-        self.X_test = tf.placeholder(tf.float32, shape=(None, D), name="X_test")
+        self.X_val = tf.placeholder(tf.float32, shape=(None, D), name="X_val")
 
         with tf.name_scope("positive_phase"):
             # ====== 1. Clamp visible units
@@ -132,22 +128,16 @@ class RBM(object):
             self.prediction = tf.tensordot(reconstruction_probs, self.one_to_ten, axes=[[2], [0]])
 
         with tf.name_scope("sse"):
-            # Train SSE
-            mask = tf.cast(self.X_in > 0, tf.float32)
-            se = mask * (self.X_in - self.prediction) * (self.X_in - self.prediction)
+            mask = tf.cast(self.X_val > 0, tf.float32)
+            se = mask * (self.X_val - self.prediction) * (self.X_val - self.prediction)
             self.sse = tf.reduce_sum(se, name="sse")
-
-            # test SSE
-            mask = tf.cast(self.X_test > 0, tf.float32)
-            tse = mask * (self.X_test - self.prediction) * (self.X_test - self.prediction)
-            self.test_sse = tf.reduce_sum(tse, name="test_sse")
 
         with tf.name_scope("save_and_init"):
             self.initop = tf.global_variables_initializer()
             saver = tf.train.Saver()
             self.saver = saver;
 
-    def fit(self, X, X_test, epochs=10, batch_sz=256, print_interval=20, show_fig=True):
+    def fit(self, X_train, X_val_visible, X_val_hidden, epochs=10, batch_sz=256, print_interval=25, show_fig=True):
 
         self.graph = tf.Graph()
         with self.graph.as_default():
@@ -178,13 +168,13 @@ class RBM(object):
             print("Statistics file ", self.checkpoint_path, " doesn't exist. Starting again..")
             self.session.run(self.initop);
 
-        N, D = X.shape
+        N, D = X_train.shape
         n_batches = int(np.ceil(N / batch_sz))
 
         for epoch in range(start_epoch, epochs):
             t0 = datetime.now()
             print("Computing epoch:", epoch)
-            X, X_test = shuffle(X, X_test)  # everything has to be shuffled
+            X_train = shuffle(X_train)
 
             # Reset counters
             sse = 0
@@ -194,39 +184,62 @@ class RBM(object):
             test_n = 0
 
             curr_batch = 0;
-            for X_batch, X_test_batch in batch_iterator(X, X_test, batch_sz):
+            for X_batch in batch_iterator(X=X_train, batch_sz=batch_sz):
 
                 _, loss, = self.session.run(
                     [self.train_op, self.loss],
-                    feed_dict={self.X_in: X_batch, self.X_test: X_test_batch}
+                    feed_dict={self.X_in: X_batch}
                 )
-
-                # We need to run sse and test_sse in a different run because otherwise we would use
-                # the old "reconstruction_logits" used to calculate the "loss" value,
-                # and of course we want a updated value of "reconstruction_logits" (after the train_op is run)
-                # to calculate the new sse and test_sse.
-
-                batch_sse, batch_tsse = self.session.run(
-                    [self.sse, self.test_sse],
-                    feed_dict={self.X_in: X_batch, self.X_test: X_test_batch}
-                )
-
-                # number of train ratings
-                n += np.count_nonzero(X_batch);
-                test_n += np.count_nonzero(X_test_batch)
-
-                sse += batch_sse
-                test_sse += batch_tsse
 
                 if (curr_batch % print_interval == 0):
                     print("Batches {:d}/{:d}, Loss:{:.6f} ".format(curr_batch, n_batches, loss))
+
                 curr_batch += 1
 
-            train_mse = sse / n;
+            # Calculate the sse after the train_op. The is no way to enforce this through a control dependencies.
+            # Only take a sample from it each print_interval iterations. To accelerate training
+            # If the train_sse we can't calculate using minibatches during training, the result will be a combination
+            # of old models with new models. And because the test_sse is calculated using the last model (calculated from
+            # the last training batch of the epoch) we might end up during the first epochs having a mse better for testing
+            # than for training.
+            # That's why we have two options to calculate the sse:
+            # 1. Calculate the sse using sse_batches that are computed not on each batch during training,
+            # but create another loop AFTER THE EPOCH. Calculate all sse_batches using the last model trained
+            # 2. Calculate the sse directly using the last batch and the last model learned in teh epoch.
+            # I prefer the last one as it is less computationally expensive. Although the mse will be biased toward this last
+            # batch. (Which is not really important as remenber it is only a proxy)
+            batch_sse = self.session.run(self.sse, feed_dict={self.X_in: X_batch, self.X_val: X_batch})
+
+            print("N samples to calculate train mse, ", len(X_batch))
+            train_mse = batch_sse / np.count_nonzero(X_batch);
+
+            # We calculate the test_sse at each minibatch(or interval) using the whole test dataset. Otherwise if we
+            # calcualted small contributions of the test_sse at each batch using the models weights for that minibatch and
+            # then take the average at the end of the epcoh, the result would be a combination sses from old weights and new
+            # weights making the calculation incoherent.
+            # However if the test data is too large for the test_sse to be computed in one step then ...
+
+            # ...we can to calculate the test_sse using minibatches at the end of each epoch using the last weights model.
+            # All minibatches will usge the last model weights so we are sure the average is not biased.
+
+            for X_batch_visible, X_batch_hidden in batch_iterator(X=X_val_visible, X_test=X_val_hidden,
+                                                                  batch_sz=batch_sz):
+                batch_tsse = self.session.run(
+                    self.sse,
+                    feed_dict={self.X_in: X_batch_visible, self.X_val: X_batch_hidden}
+                )
+
+                # number of train ratings
+                test_n += np.count_nonzero(X_batch_visible)
+                test_sse += batch_tsse
+
             test_mse = test_sse / test_n;
 
             train_mses.append(train_mse)
             test_mses.append(test_mse)
+
+            # In order to save the best model we need to make use of a measurement that is not overfitted to the
+            # training set. So we always use the test set
 
             if test_mse < best_mse:
                 print("Saving best model, mse {:.6f} ".format(test_mse))
@@ -243,8 +256,11 @@ class RBM(object):
         self._restore_best_model();
 
         if show_fig:
+            plt.title("MSE error during training/test")
             plt.plot(train_mses, label='train mse')
             plt.plot(test_mses, label='test mse')
+            plt.xlabel("Epoch")
+            plt.ylabel("MSE")
             plt.legend()
             plt.show()
 
@@ -306,14 +322,13 @@ class RBM(object):
         prediction = self.session.run(self.prediction, feed_dict={self.X_in: X})
         return np.round(prediction).astype(np.int)
 
-
 def main():
-    A_train = load_npz("A_train.npz")
-    A_test = load_npz("A_test.npz")
+
+    A_val_visible = load_npz("./sparse_datasets/A_val_visible.npz")
+    A_val_hidden = load_npz("./sparse_datasets/A_val_hidden.npz")
+    A_train = load_npz("./sparse_datasets/A_train.npz")
+
     print("Done loading data...");
     N, M = A_train.shape
     rbm = RBM(M, 50, 10)
-    rbm.fit(A_train, A_test)
-
-if __name__ == '__main__':
-    main()
+    rbm.fit(A_train, A_val_visible, A_val_hidden)
