@@ -19,7 +19,7 @@ The error curves are shown next:
 ![MSE error](mse_error.png)
 
 
-For final evaluation, precision, recalll and f1 score were calculated using the test set. A rating greater than 3 is consider positive.
+For final evaluation, Precision, Recall and F1 score were calculated using the test set. A rating greater than 3 is consider positive.
 
 Precision: 0.7106\
 Recall: 0.9178\
